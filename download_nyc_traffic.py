@@ -29,6 +29,7 @@ import os
 import sys
 import argparse
 import logging
+import time
 from datetime import date
 from pathlib import Path
 
@@ -110,6 +111,12 @@ def save_checkpoint(
 
 # ── Socrata API ────────────────────────────────────────────────────────────────
 
+_RETRYABLE = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
 def fetch_page(dataset_id: str, start_ts: str, end_ts: str, offset: int) -> list[dict]:
     url = f"{SOCRATA_BASE}/{dataset_id}.json"
     params = {
@@ -118,9 +125,17 @@ def fetch_page(dataset_id: str, start_ts: str, end_ts: str, offset: int) -> list
         "$limit":  PAGE_SIZE,
         "$offset": offset,
     }
-    r = requests.get(url, params=params, timeout=120)
-    r.raise_for_status()
-    return r.json()
+    for attempt in range(1, 6):
+        try:
+            r = requests.get(url, params=params, timeout=120)
+            r.raise_for_status()
+            return r.json()
+        except _RETRYABLE as e:
+            if attempt == 5:
+                raise
+            wait = 2 ** attempt
+            log.warning("  Transient error (attempt %d/5): %s — retrying in %ds", attempt, e, wait)
+            time.sleep(wait)
 
 
 def stream_dataset(
