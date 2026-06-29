@@ -62,6 +62,17 @@ For each station-day in 2025, the model produces:
 
 A positive residual means ridership exceeded the model's pre-policy baseline, consistent with riders switching from cars to the subway in response to congestion pricing.
 
+## Analysis (and open avenues)
+
+Analysis of Uplift
+- is there uplift in general (by day or month)?
+- if there is uplift, is it correlated with distance to congestion pricing locations (e.g. is there higher uplift in ridership for stations that are closer to congestion pricing locations ⭢ this would help establish the possibility of cause and effect)
+
+Improvements
+- try to find other covariates so that the Facebook prophet model is better
+- is distance of a ride captured? or maybe average distance of ride during a day for each station (it's plausible that stations with further average ride distance is correlated with ridership uplift)
+
+
 ## Files
 
 | File | Contents |
