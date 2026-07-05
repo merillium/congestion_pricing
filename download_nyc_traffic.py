@@ -6,7 +6,7 @@ via the Socrata API — the most granular public transit dataset available:
 estimated ridership by station complex, payment method, and fare class
 for every hour the subway operates (July 2020 onwards).
 
-Datasets:
+Datasets (before and after congestion pricing intervention in Jan 2025):
   2020–2024: https://data.ny.gov/Transportation/MTA-Subway-Hourly-Ridership-2020-2024/wujg-7c2s
   2025+:     https://data.ny.gov/Transportation/MTA-Subway-Hourly-Ridership-Beginning-2025/5wq4-mkjj
 
@@ -14,7 +14,7 @@ Columns: transit_timestamp, station_complex_id, station_complex, borough,
          payment_method, fare_class_category, ridership, transfers, lat, lon.
 
 Usage:
-    python download_nyc_traffic.py [--start 2024-01-01] [--end 2024-12-31]
+    [caffeinate] python download_nyc_traffic.py [--start 2024-01-01] [--end 2024-12-31]
 
 Checkpointing:
     Progress is saved after every page (50k rows). If the process is killed,
@@ -45,9 +45,7 @@ SOCRATA_BASE = "https://data.ny.gov/resource"
 DATASET_2020_2024 = "wujg-7c2s"
 DATASET_2025_PLUS = "5wq4-mkjj"
 
-OUTPUT_DIR      = Path(__file__).parent / "data"
-OUTPUT_FILE     = OUTPUT_DIR / "nyc_mta_hourly_ridership.csv"
-CHECKPOINT_FILE = OUTPUT_DIR / "download_checkpoint.json"
+OUTPUT_DIR = Path(__file__).parent / "data"
 
 PAGE_SIZE = 50_000
 
@@ -67,12 +65,12 @@ OUT_COLS = [
 
 # ── Checkpoint ─────────────────────────────────────────────────────────────────
 
-def load_checkpoint(start: date, end: date) -> dict | None:
+def load_checkpoint(start: date, end: date, checkpoint_file: Path) -> dict | None:
     """Return saved checkpoint if it matches the requested date range, else None."""
-    if not CHECKPOINT_FILE.exists():
+    if not checkpoint_file.exists():
         return None
     try:
-        with open(CHECKPOINT_FILE) as f:
+        with open(checkpoint_file) as f:
             cp = json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
@@ -90,9 +88,10 @@ def save_checkpoint(
     csv_pos: int,
     rows_written: int,
     completed_datasets: list[str],
+    checkpoint_file: Path,
 ) -> None:
     """Atomically write checkpoint via temp-file rename (POSIX atomic)."""
-    tmp = CHECKPOINT_FILE.with_suffix(".json.tmp")
+    tmp = checkpoint_file.with_suffix(".json.tmp")
     payload = {
         "start": str(start),
         "end": str(end),
@@ -106,7 +105,7 @@ def save_checkpoint(
         json.dump(payload, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, CHECKPOINT_FILE)
+    os.replace(tmp, checkpoint_file)
 
 
 # ── Socrata API ────────────────────────────────────────────────────────────────
@@ -149,6 +148,7 @@ def stream_dataset(
     start: date,
     end: date,
     completed_datasets: list[str],
+    checkpoint_file: Path,
 ) -> int:
     """
     Page through one Socrata dataset, writing each complete page to the CSV
@@ -172,7 +172,7 @@ def stream_dataset(
 
         rows_written += len(page)
         save_checkpoint(start, end, dataset_id, offset + PAGE_SIZE,
-                        csv_pos, rows_written, completed_datasets)
+                        csv_pos, rows_written, completed_datasets, checkpoint_file)
         log.info("  → wrote %d rows (running total: %d)", len(page), rows_written)
 
         if len(page) < PAGE_SIZE:
@@ -187,19 +187,22 @@ def stream_dataset(
 def main(start: date, end: date) -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    cp = load_checkpoint(start, end)
+    output_file     = OUTPUT_DIR / f"nyc_mta_hourly_ridership_{start}_{end}.csv"
+    checkpoint_file = OUTPUT_DIR / f"download_checkpoint_{start}_{end}.json"
 
-    if cp and OUTPUT_FILE.exists():
+    cp = load_checkpoint(start, end, checkpoint_file)
+
+    if cp and output_file.exists():
         log.info(
             "Resuming from checkpoint: %d rows written, dataset=%s offset=%d",
             cp["rows_written"], cp["current_dataset"], cp["next_offset"],
         )
         # Drop any partial page that was written after the last checkpoint
-        with open(OUTPUT_FILE, "r+", newline="") as f:
+        with open(output_file, "r+", newline="") as f:
             f.seek(cp["csv_pos"])
             f.truncate()
-        csv_mode         = "a"
-        write_header     = False
+        csv_mode           = "a"
+        write_header       = False
         rows_written       = cp["rows_written"]
         completed_datasets = cp["completed_datasets"]
         checkpoint_dataset = cp["current_dataset"]
@@ -207,8 +210,8 @@ def main(start: date, end: date) -> None:
     else:
         if cp:
             log.info("Checkpoint found but CSV missing — starting fresh.")
-        csv_mode         = "w"
-        write_header     = True
+        csv_mode           = "w"
+        write_header       = True
         rows_written       = 0
         completed_datasets = []
         checkpoint_dataset = None
@@ -220,7 +223,7 @@ def main(start: date, end: date) -> None:
     if end.year >= 2025:
         segments.append((DATASET_2025_PLUS, max(start, date(2025, 1, 1)), end))
 
-    with open(OUTPUT_FILE, csv_mode, newline="") as f:
+    with open(output_file, csv_mode, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=OUT_COLS, extrasaction="ignore")
         if write_header:
             writer.writeheader()
@@ -241,20 +244,21 @@ def main(start: date, end: date) -> None:
                 resume_offset, rows_written,
                 start, end,
                 completed_datasets,
+                checkpoint_file,
             )
 
             completed_datasets.append(dataset_id)
             save_checkpoint(start, end, dataset_id, 0, f.tell(),
-                            rows_written, completed_datasets)
+                            rows_written, completed_datasets, checkpoint_file)
             log.info("=== dataset=%s complete ===", dataset_id)
 
     if rows_written == 0:
         log.error("No data returned — check date range and network.")
         sys.exit(1)
 
-    CHECKPOINT_FILE.unlink(missing_ok=True)
-    CHECKPOINT_FILE.with_suffix(".json.tmp").unlink(missing_ok=True)
-    log.info("Done. %d rows → %s", rows_written, OUTPUT_FILE)
+    checkpoint_file.unlink(missing_ok=True)
+    checkpoint_file.with_suffix(".json.tmp").unlink(missing_ok=True)
+    log.info("Done. %d rows → %s", rows_written, output_file)
 
 
 if __name__ == "__main__":
@@ -262,8 +266,8 @@ if __name__ == "__main__":
         description="Download NYC MTA subway hourly ridership via NY Open Data (Socrata)."
     )
     parser.add_argument(
-        "--start", default="2024-01-01", metavar="YYYY-MM-DD",
-        help="Start date (default: 2024-01-01)",
+        "--start", default="2020-01-01", metavar="YYYY-MM-DD",
+        help="Start date (default: 2020-01-01)",
     )
     parser.add_argument(
         "--end", default=date.today().isoformat(), metavar="YYYY-MM-DD",
