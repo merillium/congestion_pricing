@@ -8,7 +8,8 @@ from tqdm import tqdm
 logging.getLogger("prophet").setLevel(logging.WARNING)
 logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
 
-CSV_PATH = "data/nyc_mta_hourly_ridership.csv"
+train_path = "data/nyc_mta_hourly_ridership_2020-01-01_2024-12-31.csv"
+test_path = "data/nyc_mta_hourly_ridership_2025-01-01_2025-12-31.csv"
 MIN_ANNUAL = 50_000
 
 
@@ -19,10 +20,13 @@ class RidershipModel:
         self.models = {}
 
     def load_data(self):
-        df = pd.read_csv(CSV_PATH, parse_dates=["transit_timestamp"])
+        train_df = pd.read_csv(train_path, parse_dates=["transit_timestamp"])
+        test_df = pd.read_csv(test_path, parse_dates=["transit_timestamp"])
 
+        ## train on years 2022-2024 to avoid conflating the baseline 
+        ## with the significant ridership drop due to covid (see explore.ipynb)
         self.train = (
-            df[df["transit_timestamp"].dt.year == 2024]
+            train_df[(train_df["transit_timestamp"].dt.year <= 2024) & (train_df["transit_timestamp"].dt.year >= 2022)]
             .assign(date=lambda d: d["transit_timestamp"].dt.normalize())
             .groupby(["date", "station_complex"])["ridership"]
             .sum()
@@ -30,7 +34,7 @@ class RidershipModel:
         )
 
         self.test = (
-            df[df["transit_timestamp"].dt.year == 2025]
+            test_df[test_df["transit_timestamp"].dt.year == 2025]
             .assign(date=lambda d: d["transit_timestamp"].dt.normalize())
             .groupby(["date", "station_complex"])["ridership"]
             .sum()
@@ -45,7 +49,7 @@ class RidershipModel:
             .index.tolist()
         )
 
-        ny_holidays = hdays.country_holidays("US", subdiv="NY", years=[2024, 2025])
+        ny_holidays = hdays.country_holidays("US", subdiv="NY", years=[2022, 2023, 2024, 2025])
         holiday_df = pd.DataFrame([
             {"ds": pd.Timestamp(d), "holiday": name}
             for d, name in ny_holidays.items()
